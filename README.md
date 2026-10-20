@@ -26,6 +26,8 @@ It also works with AI assistants. Connect Claude, ChatGPT, Gemini or Grok to Fol
 - **New issues arrive on their own.** When Wi-Fi comes on, the newest issues download into a `Folio` folder as EPUB, so they reflow to your screen and font settings.
 - **Your library, with covers.** See the latest issue, what you've read and what's waiting.
 - **Make an issue from your inbox.** Tick a few saved articles and tap *Generate issue*.
+- **Read single articles straight away.** Tap any article in the inbox to open it as its own page, with images, without waiting for the next issue.
+- **Big libraries stay fast.** Folio loads your 20 newest issues and fetches older ones when you page back.
 - **Save links while you read.** Tap any link in a book and choose *Save to Folio inbox*.
 - **Highlights in one place.** Everything you highlight in a Folio issue, grouped by article, with a Markdown export.
 - **Made for e-ink.** A calm, typographic design with a warm palette on color screens (Kobo Libra Colour, PocketBook Era Color, Boox) and a crisp black-and-white one everywhere else.
@@ -33,6 +35,7 @@ It also works with AI assistants. Connect Claude, ChatGPT, Gemini or Grok to Fol
 <p>
 <img src="screenshots/color/02-contents.png" width="200" alt="Issue contents grouped by topic">
 <img src="screenshots/color/04-highlights.png" width="200" alt="Highlights from Folio issues">
+<img src="screenshots/color/07-preview.png" width="200" alt="An inbox article opened on its own in KOReader, with images">
 <img src="screenshots/color/05-save-link.png" width="200" alt="Save a link to the Folio inbox while reading">
 <img src="screenshots/color/06-settings.png" width="200" alt="Folio plugin settings">
 </p>
@@ -45,6 +48,7 @@ It also works with AI assistants. Connect Claude, ChatGPT, Gemini or Grok to Fol
 <img src="screenshots/bw/02-contents.png" width="200" alt="Contents screen in black and white">
 <img src="screenshots/bw/03-inbox.png" width="200" alt="Inbox screen in black and white">
 <img src="screenshots/bw/04-highlights.png" width="200" alt="Highlights screen in black and white">
+<img src="screenshots/bw/07-preview.png" width="200" alt="Inbox article preview in black and white">
 <img src="screenshots/bw/05-save-link.png" width="200" alt="Save a link in black and white">
 <img src="screenshots/bw/06-settings.png" width="200" alt="Settings screen in black and white">
 </p>
@@ -72,7 +76,7 @@ You need a Folio account. [Start a trial at myfolio.so](https://myfolio.so/?utm_
 | Tab | What it does |
 |-----|--------------|
 | Issues | Your latest issue and your library. Tap a cover to see what's inside. |
-| Inbox | Saved articles. Tick a few and tap *Generate issue*. *Add link* saves a new one. |
+| Inbox | Saved articles. Tap one to read it now, or tick a few and tap *Generate issue*. *Add link* saves a new one. |
 | Highlights | What you've highlighted in your issues. *Markdown* saves them to a file. |
 | Settings | Auto-download on Wi-Fi, folder, how many issues to keep, EPUB or PDF, and Disconnect. |
 
