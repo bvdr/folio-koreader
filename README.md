@@ -67,9 +67,28 @@ Any device that runs KOReader: Kobo (Clara, Libra, Sage, Elipsa), PocketBook, Ki
    - Kindle: `koreader/plugins/`
    - PocketBook: `applications/koreader/plugins/`
    - Android: `koreader/plugins/` on internal storage
-4. Restart KOReader and open **Tools → Folio**.
+4. Restart KOReader and open Folio (see below).
 
 You need a Folio account. [Start a trial at myfolio.so](https://myfolio.so/?utm_source=github&utm_medium=readme&utm_campaign=koreader).
+
+## Find Folio in KOReader
+
+Folio lives in KOReader's **Tools** menu, on the menu's second page. It's in the same place whether you're in the file browser or reading a book.
+
+1. **Open the menu.** Tap the top of the screen. While reading, tap the top edge of the page.
+2. **Tap the Tools tab** (the wrench and screwdriver icon). Marked 1 below.
+3. **Go to page 2.** Tap the right arrow next to "Page 1 of 2". Marked 2.
+4. **Tap Folio.** Marked 3. The first time, Folio shows your connection code.
+
+<p>
+<img src="screenshots/guide/1-open-menu.png" width="320" alt="KOReader file browser: tap the top of the screen to open the menu">
+<img src="screenshots/guide/2-tools-folio.png" width="320" alt="KOReader Tools menu, page 2, with Folio at the bottom">
+<img src="screenshots/guide/3-while-reading.png" width="320" alt="The same Tools menu while reading a book, with Folio at the bottom">
+</p>
+
+<img src="screenshots/guide/4-folio-opens.png" width="220" alt="Folio opens and shows a six-character code to connect the reader">
+
+**Don't see Folio?** Check that the folder is called exactly `folio.koplugin` and sits directly in KOReader's `plugins` folder, then restart KOReader. If it's still missing, open **Tools → More tools → Plugin management** and make sure Folio is turned on.
 
 ## Use
 
