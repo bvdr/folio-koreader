@@ -37,7 +37,7 @@ local Screen = Device.screen
 
 local UI = require("folioui")
 
-local VERSION = "0.2.6"
+local VERSION = "0.2.7"
 local DEFAULT_SERVER = "https://myfolio.so"
 -- Give up polling for a freshly made issue after this long; the next sync
 -- (or Wi-Fi reconnect) picks it up anyway.
@@ -121,6 +121,12 @@ function Folio:localFormat(issue)
     return type(d) == "table" and d.format or (d and "kindle") or nil
 end
 
+--- Drop everything tied to the signed-in account (token, forwarding address).
+function Folio:forgetAccount()
+    self:save("token", nil)
+    self:save("forward_email", nil)
+end
+
 function Folio:save(key, value)
     self.settings:saveSetting(key, value)
     self.settings:flush()
@@ -164,7 +170,7 @@ function Folio:request(method, path, body, filepath)
     end
     if code == 401 and token then
         -- Session revoked or expired: drop it so Folio shows Connect again.
-        self:save("token", nil)
+        self:forgetAccount()
     end
     local data
     if not filepath then
@@ -258,7 +264,11 @@ end
 function Folio:disconnect()
     -- Best effort: even if the server is unreachable, forget the token locally.
     self:request("POST", "/api/auth/device/logout", {})
-    self:save("token", nil)
+    self:forgetAccount()
+end
+
+function Folio:showForwardHelp(email)
+    toast(T(_("Your Folio address:\n\n%1\n\nForward newsletters and emails here and they land in this inbox. To get a newsletter automatically, set up a forwarding rule in Gmail, Outlook or Fastmail."), email))
 end
 
 function Folio:showHelp()
@@ -524,7 +534,7 @@ function Folio:promptServer(after)
                 UIManager:close(dialog)
                 if url:match("^https://") then
                     -- A token belongs to one server; switching means re-pairing.
-                    if url ~= self:server() then self:save("token", nil) end
+                    if url ~= self:server() then self:forgetAccount() end
                     self:save("server", url)
                     if after then after() end
                 else
@@ -749,6 +759,11 @@ function FolioView:load()
                 self.data.articles_total = data.total
             end
             self:loadNextIssue()
+            -- Forwarding address for the Inbox header. Cached: it never changes.
+            if not folio.settings:readSetting("forward_email") then
+                local c, d = folio:request("GET", "/api/user/email-address")
+                if c == 200 and d and d.email then folio:save("forward_email", d.email) end
+            end
         elseif self.tab == "settings" then
             local code, me = folio:request("GET", "/api/me")
             if code == 200 then self.data.me = me end

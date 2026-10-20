@@ -415,8 +415,12 @@ local function paginate(rows, avail, gap)
     return pages
 end
 
-local function heading(title, sub, right, W)
-    local left = col({ text(title, F.serif, 36), sub and text(sub, F.sans, 14, C.muted, W - (right and right:getSize().w + px(16) or 0)) or nil }, 4)
+--- Page title with an optional subtitle, an optional widget beside the title
+-- (beside), and an optional widget pinned right (right).
+local function heading(title, sub, right, W, beside)
+    local t = text(title, F.serif, 36)
+    if beside then t = row({ t, beside }, 16) end
+    local left = col({ t, sub and text(sub, F.sans, 14, C.muted, W - (right and right:getSize().w + px(16) or 0)) or nil }, 4)
     if right then return spread(left, right, W, "bottom") end
     return left
 end
@@ -641,7 +645,15 @@ function UI.inbox(view, W, H)
         { padding = { 10, 16 }, stroke = C.strong, stroke_width = 1.5, radius = 6 }), function() view.folio:promptLink(function() view:reload() end) end)
     local sub = #articles == 0 and _("Nothing waiting. Save links from your phone, or tap Add link.")
         or T(_("%1 articles waiting, about %2 of reading."), view.data.articles_total or #articles, minutes(total_min))
-    local blocks = { heading(_("Inbox"), sub, add, W) }
+    -- The user's forwarding address next to the title: where newsletters go.
+    local forward
+    local email = view.folio.settings:readSetting("forward_email")
+    if email then
+        local max_w = W - add:getSize().w - text(_("Inbox"), F.serif, 36):getSize().w - px(64)
+        forward = tap(box(row({ icon("mail", 14), text(email, F.sans_medium, 14, C.ink, max_w - px(44)) }, 6),
+            { padding = { 6, 12 }, fill = C.surface, radius = 20 }), function() view.folio:showForwardHelp(email) end)
+    end
+    local blocks = { heading(_("Inbox"), sub, add, W, forward) }
 
     -- Next scheduled issue
     local nxt = view.data.next_run
