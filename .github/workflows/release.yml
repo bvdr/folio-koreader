@@ -1,0 +1,16 @@
+# Push a tag like v0.1.0 → GitHub release with folio.koplugin.zip attached.
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: zip -r folio.koplugin.zip folio.koplugin
+      - run: gh release create "$GITHUB_REF_NAME" folio.koplugin.zip --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
