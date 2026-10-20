@@ -3,7 +3,8 @@ Folio for KOReader.
 
 Pairs with a Folio account by device code (myfolio.so/link), downloads
 finished issues into a "Folio" folder, lets you build an issue from your
-inbox, and adds a "Save to Folio inbox" button to the link dialog.
+inbox, shows your highlights, and adds a "Save to Folio inbox" button to
+the link dialog. The screens live in folioui.lua.
 
 Server side: web/src/routes/device-link.ts in the Folio repo.
 
@@ -12,13 +13,17 @@ Server side: web/src/routes/device-link.ts in the Folio repo.
 
 local DataStorage = require("datastorage")
 local Device = require("device")
+local DocSettings = require("docsettings")
+local FrameContainer = require("ui/widget/container/framecontainer")
+local Geom = require("ui/geometry")
 local InfoMessage = require("ui/widget/infomessage")
+local InputContainer = require("ui/widget/container/inputcontainer")
 local InputDialog = require("ui/widget/inputdialog")
 local JSON = require("json")
 local LuaSettings = require("luasettings")
-local Menu = require("ui/widget/menu")
 local NetworkMgr = require("ui/network/manager")
 local UIManager = require("ui/uimanager")
+local VerticalGroup = require("ui/widget/verticalgroup")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local http = require("socket.http")
 local lfs = require("libs/libkoreader-lfs")
@@ -28,16 +33,24 @@ local socket = require("socket")
 local socketutil = require("socketutil")
 local T = require("ffi/util").template
 local _ = require("gettext")
+local Screen = Device.screen
 
+local UI = require("folioui")
+
+local VERSION = "0.2.0"
 local DEFAULT_SERVER = "https://myfolio.so"
 -- Give up polling for a freshly made issue after this long; the next sync
 -- (or Wi-Fi reconnect) picks it up anyway.
 local ISSUE_POLL_SECONDS = 15
 local ISSUE_POLL_MAX_TRIES = 40
+-- Article to jump to when the reader opens. Module-level because the reader
+-- gets its own plugin instance, separate from the file browser's.
+local pending_chapter
 
 local Folio = WidgetContainer:extend{
     name = "folio",
     is_doc_only = false,
+    version = VERSION,
 }
 
 function Folio:init()
@@ -49,9 +62,9 @@ function Folio:init()
                 text = _("Save to Folio inbox"),
                 callback = function()
                     UIManager:close(this.external_link_dialog)
-                    self:saveLink(link_url)
+                    self:showSaveLink(link_url)
                 end,
-                show_in_dialog_func = function() return self:token() ~= nil end,
+                show_in_dialog_func = function() return self:token() ~= nil and self:linkButton() end,
             }
         end)
     end
@@ -62,6 +75,8 @@ end
 function Folio:server() return self.settings:readSetting("server") or DEFAULT_SERVER end
 function Folio:token() return self.settings:readSetting("token") end
 function Folio:autoSync() return self.settings:nilOrTrue("auto_sync") end
+function Folio:linkButton() return self.settings:nilOrTrue("link_button") end
+function Folio:preferPdf() return self.settings:isTrue("prefer_pdf") end
 
 function Folio:downloadDir()
     local dir = self.settings:readSetting("dir")
@@ -70,8 +85,26 @@ function Folio:downloadDir()
     return home .. "/Folio"
 end
 
--- issue id (string) → local file path. String keys: LuaSettings round-trips them reliably.
+--- "Books / Folio": the last two parts of the folder, like the design shows.
+function Folio:folderLabel()
+    local parts = {}
+    for p in self:downloadDir():gmatch("[^/]+") do table.insert(parts, p) end
+    return table.concat({ parts[#parts - 1], parts[#parts] }, " / ")
+end
+
+-- issue id (string) → { path = ..., format = ... }. String keys: LuaSettings round-trips them reliably.
 function Folio:downloaded() return self.settings:readSetting("downloaded") or {} end
+
+function Folio:localPath(issue)
+    local d = self:downloaded()[tostring(issue.id)]
+    local path = type(d) == "table" and d.path or d
+    if path and lfs.attributes(path, "mode") == "file" then return path end
+end
+
+function Folio:localFormat(issue)
+    local d = self:downloaded()[tostring(issue.id)]
+    return type(d) == "table" and d.format or (d and "kindle") or nil
+end
 
 function Folio:save(key, value)
     self.settings:saveSetting(key, value)
@@ -115,12 +148,14 @@ function Folio:request(method, path, body, filepath)
         return nil
     end
     if code == 401 and token then
-        -- Session revoked or expired: drop it so the menu offers Connect again.
+        -- Session revoked or expired: drop it so Folio shows Connect again.
         self:save("token", nil)
     end
     local data
     if not filepath then
-        local ok, decoded = pcall(JSON.decode, table.concat(sink))
+        -- .simple: JSON null → nil (the default decodes null to a function, which
+        -- breaks every `x or default` and `if x then` on server fields).
+        local ok, decoded = pcall(JSON.decode, table.concat(sink), JSON.decode.simple)
         if ok then data = decoded end
     end
     return code, data, resp_headers
@@ -145,58 +180,50 @@ end
 
 local NETWORK_ERROR = _("Couldn't reach Folio. Check your Wi-Fi and try again.")
 
--- ─── connect ─────────────────────────────────────────────────────────────────
+-- ─── pairing ─────────────────────────────────────────────────────────────────
 
-function Folio:connect()
-    NetworkMgr:runWhenOnline(function()
-        local code, data = self:request("POST", "/api/auth/device/code", {})
-        if code ~= 200 or not data then
-            toast(code and _("Folio couldn't start pairing. Try again in a minute.") or NETWORK_ERROR)
-            return
+--- Ask for a code and poll until the user approves it at /link.
+-- Returns the pairing table; set .cancelled on it to stop polling.
+function Folio:startPairing(on_update, on_done)
+    local code, data = self:request("POST", "/api/auth/device/code", {})
+    if code ~= 200 or not data then
+        local failed = { error = code and _("Folio couldn't start pairing. Try again in a minute.") or NETWORK_ERROR }
+        on_update(failed)
+        return failed
+    end
+    local pairing = data
+    local deadline = os.time() + (data.expires_in or 600)
+    local function expired()
+        pairing.user_code = nil
+        pairing.error = _("That code expired. Close Folio and open it again for a new one.")
+        on_update(pairing)
+    end
+    local function poll()
+        if pairing.cancelled then return end
+        if os.time() > deadline then return expired() end
+        local c, d = self:request("POST", "/api/auth/device/token", { device_code = data.device_code })
+        if c == 200 and d and d.token then
+            self:save("token", d.token)
+            self:save("connected_at", os.time())
+            on_done()
+        elseif c == nil or (d and d.error == "authorization_pending") then
+            UIManager:scheduleIn(data.interval or 5, poll)
+        else
+            expired()
         end
-        local pretty = data.user_code:sub(1, 3) .. "–" .. data.user_code:sub(4)
-        local host = (data.verification_uri or ""):gsub("^https?://", "")
-        local dialog
-        local cancelled = false
-        dialog = InfoMessage:new{
-            text = T(_("Connect this reader\n\n1. On your phone or computer, open %1\n\n2. Enter this code:\n\n%2\n\nNew issues will download here on their own. Tap to cancel."), host, pretty),
-            dismiss_callback = function() cancelled = true end,
-        }
-        UIManager:show(dialog)
-
-        local deadline = os.time() + (data.expires_in or 600)
-        local function poll()
-            if cancelled then return end
-            if os.time() > deadline then
-                UIManager:close(dialog)
-                toast(_("That code expired. Choose Connect to get a new one."))
-                return
-            end
-            local c, d = self:request("POST", "/api/auth/device/token", { device_code = data.device_code })
-            if c == 200 and d and d.token then
-                cancelled = true
-                UIManager:close(dialog)
-                self:save("token", d.token)
-                toast(_("Connected to Folio."), 3)
-                self:sync(true)
-            elseif c == nil or (d and d.error == "authorization_pending") then
-                UIManager:scheduleIn(data.interval or 5, poll)
-            else
-                UIManager:close(dialog)
-                toast(_("That code expired. Choose Connect to get a new one."))
-            end
-        end
-        UIManager:scheduleIn(data.interval or 5, poll)
-    end)
+    end
+    UIManager:scheduleIn(data.interval or 5, poll)
+    return pairing
 end
 
 function Folio:disconnect()
-    NetworkMgr:runWhenOnline(function()
-        -- Best effort: even if the server is unreachable, forget the token locally.
-        self:request("POST", "/api/auth/device/logout", {})
-        self:save("token", nil)
-        toast(_("Disconnected from Folio. Downloaded issues stay on this reader."))
-    end)
+    -- Best effort: even if the server is unreachable, forget the token locally.
+    self:request("POST", "/api/auth/device/logout", {})
+    self:save("token", nil)
+end
+
+function Folio:showHelp()
+    toast(_("Folio sends your reading to this reader.\n\nOn your phone, open the address shown here, sign in, and type the code. Issues then download on their own whenever Wi-Fi is on.\n\nNo account yet? Make one at myfolio.so."))
 end
 
 -- ─── issues ──────────────────────────────────────────────────────────────────
@@ -207,26 +234,32 @@ local function issueName(issue)
     return n
 end
 
---- Download one issue. Prefers the EPUB (reflows on any screen), falls back
--- to whatever render exists. Returns the local path or nil.
-function Folio:downloadIssue(issue)
+--- Download one issue in `format` (default: EPUB, or PDF if preferred).
+-- Falls back to whatever render exists. Returns the local path or nil.
+function Folio:downloadIssue(issue, format)
     local dir = self:downloadDir()
     lfs.mkdir(dir)
     local tmp = dir .. "/.folio-download"
-    for __, query in ipairs({ "?format=kindle", "" }) do
+    local wanted = format or (self:preferPdf() and "" or "kindle")
+    local tries = wanted ~= "" and { "?format=" .. wanted, "" } or { "" }
+    for __, query in ipairs(tries) do
         local code, __, headers = self:request("GET", "/library/issues/" .. issue.id .. "/download" .. query, nil, tmp)
         -- A paywalled account gets redirected to the /plans HTML page, which
         -- http.request follows; only keep real book files.
         local ctype = headers and headers["content-type"] or ""
-        if code == 200 and (ctype:find("epub", 1, true) or ctype:find("pdf", 1, true)) then
-            local cd = headers and headers["content-disposition"] or ""
-            local name = cd:match('filename="([^"]+)"') or (issueName(issue) .. ".epub")
+        local is_epub = ctype:find("epub", 1, true) ~= nil
+        if code == 200 and (is_epub or ctype:find("pdf", 1, true)) then
+            local cd = headers["content-disposition"] or ""
+            local name = cd:match('filename="([^"]+)"') or (issueName(issue) .. (is_epub and ".epub" or ".pdf"))
             name = name:gsub("[/\\:*?\"<>|]", "-")
             local path = dir .. "/" .. name
+            local old = self:localPath(issue)
+            if old and old ~= path then os.remove(old) end
             os.remove(path)
             os.rename(tmp, path)
             local downloaded = self:downloaded()
-            downloaded[tostring(issue.id)] = path
+            downloaded[tostring(issue.id)] = { path = path, format = query:match("format=([%w-]+)") or (is_epub and "kindle" or "pdf"),
+                number = issue.issue_number }
             self:save("downloaded", downloaded)
             return path
         end
@@ -245,30 +278,60 @@ function Folio:fetchIssues()
     return done
 end
 
---- Download every finished issue not on this reader yet.
+--- Cover image for an issue, cached on disk (a finished cover never changes).
+-- The extension matters: KOReader picks the image decoder from it.
+function Folio:coverPath(issue)
+    local dir = DataStorage:getDataDir() .. "/cache/folio-covers"
+    local base = dir .. "/" .. issue.id
+    for __, ext in ipairs({ ".png", ".jpg" }) do
+        if lfs.attributes(base .. ext, "mode") == "file" then return base .. ext end
+    end
+    if self.offline then return nil end
+    lfs.mkdir(DataStorage:getDataDir() .. "/cache")
+    lfs.mkdir(dir)
+    local tmp = base .. ".part"
+    local code, __, headers = self:request("GET", "/api/generations/" .. issue.id .. "/cover", nil, tmp)
+    local ctype = headers and headers["content-type"] or ""
+    if code == 200 and ctype:find("image", 1, true) then
+        local path = base .. (ctype:find("png", 1, true) and ".png" or ".jpg")
+        os.rename(tmp, path)
+        return path
+    end
+    os.remove(tmp)
+    if code == nil then self.offline = true end
+end
+
+--- Download every finished issue not on this reader yet, then tidy up.
 -- quiet: only speak up when something new arrived (auto-sync on Wi-Fi).
 function Folio:sync(quiet)
-    if not self:token() or self.syncing then return end
+    if not self:token() or self.syncing then return 0 end
     self.syncing = true
+    local got = 0
     local run = function()
         local issues, code = self:fetchIssues()
         if not issues then
             if not quiet then toast(code and _("Folio couldn't list your issues.") or NETWORK_ERROR) end
             return
         end
-        local have, got = self:downloaded(), 0
-        for __, issue in ipairs(issues) do
-            local path = have[tostring(issue.id)]
-            if not (path and lfs.attributes(path, "mode") == "file") and self:downloadIssue(issue) then
-                got = got + 1
+        local keep = self.settings:readSetting("keep_latest")
+        for i, issue in ipairs(issues) do
+            if (not keep or i <= keep) and not self:localPath(issue) and not self:wasRemoved(issue) then
+                if self:downloadIssue(issue) then got = got + 1 end
             end
         end
+        self:tidy(issues)
+        self:save("last_sync", os.time())
+        -- Cache categories for the save-link sheet, so it works offline later.
+        local c, cats = self:request("GET", "/api/categories")
+        if c == 200 and cats and cats.categories then
+            local names = {}
+            for __, cat in ipairs(cats.categories) do table.insert(names, cat.name) end
+            self:save("categories", names)
+        end
         if got > 0 then
-            toast(T(_("%1 new Folio issue(s) in your %2 folder."), got, "Folio"), 4)
+            self:save("unseen_new", (self.settings:readSetting("unseen_new") or 0) + got)
             local FileManager = require("apps/filemanager/filemanager")
             if FileManager.instance then FileManager.instance:onRefresh() end
-        elseif not quiet then
-            toast(_("You're up to date."), 2)
         end
     end
     if quiet then
@@ -278,46 +341,35 @@ function Folio:sync(quiet)
         busy(_("Checking Folio for new issues…"), run)
     end
     self.syncing = false
+    return got
+end
+
+--- Issues the plugin deleted on purpose are not downloaded again.
+function Folio:wasRemoved(issue)
+    return (self.settings:readSetting("removed") or {})[tostring(issue.id)]
+end
+
+--- Apply "Keep latest N" and "Delete finished issues".
+function Folio:tidy(issues)
+    local keep = self.settings:readSetting("keep_latest")
+    local delete_finished = self.settings:isTrue("delete_finished")
+    local downloaded, removed = self:downloaded(), self.settings:readSetting("removed") or {}
+    for i, issue in ipairs(issues) do
+        local path = self:localPath(issue)
+        if path and ((keep and i > keep) or (delete_finished and UI.readState(path) == "complete")) then
+            os.remove(path)
+            DocSettings:open(path):purge()
+            downloaded[tostring(issue.id)] = nil
+            removed[tostring(issue.id)] = true
+        end
+    end
+    self:save("downloaded", downloaded)
+    self:save("removed", removed)
 end
 
 function Folio:openFile(path)
     local ReaderUI = require("apps/reader/readerui")
     ReaderUI:showReader(path)
-end
-
-function Folio:showIssues()
-    NetworkMgr:runWhenOnline(function()
-        local issues, code
-        busy(_("Loading your issues…"), function() issues, code = self:fetchIssues() end)
-        if not issues then
-            toast(code and _("Folio couldn't list your issues.") or NETWORK_ERROR)
-            return
-        end
-        if #issues == 0 then
-            toast(_("No issues yet. Make one from your inbox, or set a schedule at myfolio.so."))
-            return
-        end
-        local menu
-        local items = {}
-        local have = self:downloaded()
-        for __, issue in ipairs(issues) do
-            local path = have[tostring(issue.id)]
-            local local_ok = path and lfs.attributes(path, "mode") == "file"
-            table.insert(items, {
-                text = issueName(issue),
-                mandatory = local_ok and _("On reader") or "",
-                callback = function()
-                    UIManager:close(menu)
-                    if not local_ok then
-                        busy(_("Downloading…"), function() path = self:downloadIssue(issue) end)
-                    end
-                    if path then self:openFile(path) else toast(_("That issue couldn't be downloaded.")) end
-                end,
-            })
-        end
-        menu = Menu:new{ title = _("Folio issues"), item_table = items, is_popout = false, is_borderless = true }
-        UIManager:show(menu)
-    end)
 end
 
 -- ─── inbox ───────────────────────────────────────────────────────────────────
@@ -329,7 +381,7 @@ function Folio:waitForIssue(id, tries)
     UIManager:scheduleIn(ISSUE_POLL_SECONDS, function()
         local code, gen = self:request("GET", "/api/generations/" .. id)
         if code == 200 and gen and gen.status == "completed" then
-            self:sync(true)
+            if self:sync(true) > 0 then toast(_("Your new Folio issue is ready."), 4) end
         elseif code == 200 and gen and gen.status == "failed" then
             toast(_("Folio couldn't make that issue. Try again from the app."))
         else
@@ -344,6 +396,7 @@ function Folio:makeIssue(ids)
     if code == 200 and data and data.id then
         toast(T(_("Issue #%1 is on its way. It will download here when it's ready, usually in a minute or two."), data.issueNumber or ""), 5)
         self:waitForIssue(data.id)
+        return true
     elseif code == 402 and data and data.error == "paywall_locked" then
         toast(_("Making issues needs an active Folio plan. See myfolio.so/plans."))
     elseif code == 402 then
@@ -353,59 +406,10 @@ function Folio:makeIssue(ids)
     end
 end
 
-function Folio:showInbox()
+function Folio:saveLink(url, category)
     NetworkMgr:runWhenOnline(function()
         local code, data
-        busy(_("Loading your inbox…"), function() code, data = self:request("GET", "/api/articles?status=inbox&limit=100") end)
-        if code ~= 200 or not data or not data.articles then
-            toast(code and _("Folio couldn't load your inbox.") or NETWORK_ERROR)
-            return
-        end
-        local selected, menu = {}, nil
-        local function build()
-            local ids = {}
-            for id in pairs(selected) do table.insert(ids, id) end
-            local items = {
-                {
-                    text = #ids > 0 and T(_("Make an issue from %1 article(s)"), #ids) or _("Tap articles to pick them"),
-                    bold = true,
-                    callback = function()
-                        if #ids == 0 then return end
-                        UIManager:close(menu)
-                        self:makeIssue(ids)
-                    end,
-                },
-                { text = _("Add a link…"), callback = function() self:promptLink() end, separator = true },
-            }
-            for __, a in ipairs(data.articles) do
-                local ready = a.scrape_status == "done"
-                table.insert(items, {
-                    text = (selected[a.id] and "☑ " or "☐ ") .. (a.title or a.url or "?"),
-                    mandatory = not ready and _("loading") or (a.read_time_minutes and T(_("%1 min"), a.read_time_minutes)) or "",
-                    dim = not ready,
-                    callback = function()
-                        if not ready then return end
-                        selected[a.id] = (not selected[a.id]) or nil
-                        menu:switchItemTable(nil, build())
-                    end,
-                })
-            end
-            return items
-        end
-        menu = Menu:new{
-            title = T(_("Inbox · %1 articles"), data.total or #data.articles),
-            item_table = build(),
-            is_popout = false,
-            is_borderless = true,
-        }
-        UIManager:show(menu)
-    end)
-end
-
-function Folio:saveLink(url)
-    NetworkMgr:runWhenOnline(function()
-        local code, data
-        busy(_("Saving to Folio…"), function() code, data = self:request("POST", "/api/articles", { url = url }) end)
+        busy(_("Saving to Folio…"), function() code, data = self:request("POST", "/api/articles", { url = url, category = category }) end)
         if code and code >= 200 and code < 300 then
             toast(_("Saved to your Folio inbox."), 2)
         else
@@ -414,7 +418,11 @@ function Folio:saveLink(url)
     end)
 end
 
-function Folio:promptLink()
+function Folio:showSaveLink(url)
+    UIManager:show(UI.saveLinkSheet(self, url, function(w) UIManager:close(w) end))
+end
+
+function Folio:promptLink(after)
     local dialog
     dialog = InputDialog:new{
         title = _("Add a link to your Folio inbox"),
@@ -424,7 +432,12 @@ function Folio:promptLink()
             { text = _("Add"), is_enter_default = true, callback = function()
                 local url = dialog:getInputText()
                 UIManager:close(dialog)
-                if url and url:match("^https?://") then self:saveLink(url) else toast(_("That doesn't look like a web link.")) end
+                if url and url:match("^https?://") then
+                    self:saveLink(url)
+                    if after then UIManager:scheduleIn(1, after) end
+                else
+                    toast(_("That doesn't look like a web link."))
+                end
             end },
         }},
     }
@@ -432,16 +445,14 @@ function Folio:promptLink()
     dialog:onShowKeyboard()
 end
 
--- ─── settings ────────────────────────────────────────────────────────────────
-
-function Folio:promptServer()
+function Folio:promptServer(after)
     local dialog
     dialog = InputDialog:new{
         title = _("Folio server"),
         description = _("Leave this as myfolio.so unless you were asked to change it."),
         input = self:server(),
         buttons = {{
-            { text = _("Reset"), callback = function() UIManager:close(dialog); self:save("server", nil) end },
+            { text = _("Reset"), callback = function() UIManager:close(dialog); self:save("server", nil); if after then after() end end },
             { text = _("Save"), is_enter_default = true, callback = function()
                 local url = (dialog:getInputText() or ""):gsub("/+$", "")
                 UIManager:close(dialog)
@@ -449,6 +460,7 @@ function Folio:promptServer()
                     -- A token belongs to one server; switching means re-pairing.
                     if url ~= self:server() then self:save("token", nil) end
                     self:save("server", url)
+                    if after then after() end
                 else
                     toast(_("The server must start with https://"))
                 end
@@ -459,49 +471,292 @@ function Folio:promptServer()
     dialog:onShowKeyboard()
 end
 
--- ─── menu ────────────────────────────────────────────────────────────────────
+-- ─── highlights ──────────────────────────────────────────────────────────────
+
+--- KOReader's highlights from every downloaded Folio issue, grouped by article
+-- (KOReader records the chapter, and each Folio article is a chapter).
+function Folio:collectHighlights()
+    local groups, by_key, issues = {}, {}, {}
+    for id, d in pairs(self:downloaded()) do
+        local path = type(d) == "table" and d.path or d
+        if path and DocSettings:hasSidecarFile(path) then
+            table.insert(issues, { id = tonumber(id), path = path, number = type(d) == "table" and d.number or nil })
+        end
+    end
+    table.sort(issues, function(a, b) return a.id > b.id end)
+    for __, issue in ipairs(issues) do
+        local ds = DocSettings:open(issue.path)
+        local number = issue.number
+        for __, a in ipairs(ds:readSetting("annotations") or {}) do
+            if a.text and a.text ~= "" then
+                local title = a.chapter or _("Untitled")
+                local key = issue.id .. "/" .. title
+                if not by_key[key] then
+                    by_key[key] = { title = title, source = number and T(_("Issue #%1"), number) or _("Folio"), items = {} }
+                    table.insert(groups, by_key[key])
+                end
+                table.insert(by_key[key].items, { text = a.text, note = a.note })
+            end
+        end
+    end
+    return groups
+end
+
+function Folio:exportHighlights(groups)
+    local lines = { "# Folio highlights", "" }
+    for __, g in ipairs(groups) do
+        table.insert(lines, "## " .. g.title .. " (" .. g.source .. ")")
+        table.insert(lines, "")
+        for __, h in ipairs(g.items) do
+            table.insert(lines, "> " .. h.text:gsub("\n", "\n> "))
+            if h.note and h.note ~= "" then table.insert(lines, "") table.insert(lines, h.note) end
+            table.insert(lines, "")
+        end
+    end
+    lfs.mkdir(self:downloadDir())
+    local path = self:downloadDir() .. "/Folio highlights.md"
+    local f = io.open(path, "w")
+    if not f then toast(_("Couldn't write the file.")) return end
+    f:write(table.concat(lines, "\n"))
+    f:close()
+    toast(T(_("Saved to %1."), self:folderLabel() .. " / Folio highlights.md"), 3)
+end
+
+-- ─── the Folio screen ────────────────────────────────────────────────────────
+
+local FolioView = InputContainer:extend{
+    covers_fullscreen = true,
+    tab = "issues",
+    page = 1,
+}
+
+function FolioView:init()
+    self.dimen = Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
+    self.data = { details = {} }
+    self.selected = {}
+    if self.folio:token() then self:load() else self:startPairing() end
+    self:refresh()
+end
+
+function FolioView:startPairing()
+    self.tab = "connect"
+    self.pairing = nil
+    NetworkMgr:runWhenOnline(function()
+        self.pairing = self.folio:startPairing(function(update)
+            self.pairing = update
+            self:refresh()
+        end, function()
+            self.tab = "issues"
+            self:load(true)
+            self:refresh()
+        end)
+        self:refresh()
+    end)
+end
+
+--- Fetch what the current tab needs. Blocking; shows a note while it runs.
+function FolioView:load(sync_first)
+    local folio = self.folio
+    folio.offline = false
+    busy(_("Loading Folio…"), function()
+        if sync_first then folio:sync(true) end
+        if self.tab == "issues" then
+            self.data.issues = folio:fetchIssues() or self.data.issues
+            local latest = self.data.issues and self.data.issues[1]
+            if latest then self:loadDetail(latest) end
+        elseif self.tab == "inbox" then
+            local code, data = folio:request("GET", "/api/articles?status=inbox&limit=100")
+            if code == 200 and data then
+                self.data.articles = data.articles or {}
+                self.data.articles_total = data.total
+            end
+            self:loadNextIssue()
+        elseif self.tab == "settings" then
+            local code, me = folio:request("GET", "/api/me")
+            if code == 200 then self.data.me = me end
+        end
+    end)
+end
+
+function FolioView:loadDetail(issue)
+    if self.data.details[issue.id] then return end
+    local code, d = self.folio:request("GET", "/api/generations/" .. issue.id)
+    if code == 200 and d then self.data.details[issue.id] = d end
+end
+
+--- Earliest upcoming run among active schedules.
+function FolioView:loadNextIssue()
+    local code, data = self.folio:request("GET", "/api/schedules")
+    self.data.next_run = nil
+    if code ~= 200 or not data or not data.schedules then return end
+    for __, s in ipairs(data.schedules) do
+        local t = s.active == 1 and UI.utc(s.next_run_at)
+        if t and t > os.time() and (not self.data.next_run or t < self.data.next_run) then self.data.next_run = t end
+    end
+    if not self.data.next_run then return end
+    local issues = self.data.issues or self.folio:fetchIssues() or {}
+    local latest = issues[1]
+    self.data.next_issue_number = latest and latest.issue_number and (latest.issue_number + 1) or 1
+end
+
+function FolioView:refresh()
+    local W, H = Screen:getWidth(), Screen:getHeight()
+    local px = UI.px
+    local content
+    if self.tab == "connect" then
+        content = UI.connect(self, W, H, W, H)
+    else
+        local top = VerticalGroup:new{ align = "left", UI.statusBar(W), UI.nav(self, W) }
+        local foot_h = UI.footer(self, W, 1, 1):getSize().h
+        local pad_top, pad_bottom = px(26), px(18)
+        local body_h = H - top:getSize().h - foot_h - pad_top - pad_bottom
+        local builder = ({ issues = UI.issues, contents = UI.contents, inbox = UI.inbox, highlights = UI.highlights, settings = UI.settings })[self.tab]
+        local blocks, pages, page = builder(self, W - px(64), body_h)
+        self.pages, self.page = pages or 1, page or 1
+        -- Pad the body out to its full height so the footer sits at the bottom.
+        local inner_h = blocks[1]:getSize().h
+        local body = FrameContainer:new{ blocks[1], bordersize = 0, margin = 0, padding = 0,
+            padding_left = px(32), padding_top = pad_top, padding_bottom = math.max(0, body_h + pad_bottom - inner_h) }
+        content = VerticalGroup:new{ align = "left", top, body, UI.footer(self, W, self.page, self.pages) }
+        if self.tab == "issues" then
+            -- They've now seen the "arrived while you were away" card.
+            self.folio:save("unseen_new", nil)
+        end
+    end
+    self[1] = FrameContainer:new{ content, background = UI.C.paper, bordersize = 0, margin = 0, padding = 0, width = W, height = H }
+    UIManager:setDirty(self, "ui")
+end
+
+function FolioView:go(tab)
+    self.tab, self.page = tab, 1
+    self:load()
+    self:refresh()
+end
+
+function FolioView:setPage(n)
+    self.page = n
+    self:refresh()
+end
+
+function FolioView:reload()
+    self:load()
+    self:refresh()
+end
+
+function FolioView:syncNow()
+    NetworkMgr:runWhenOnline(function()
+        self.folio:sync(false)
+        self:reload()
+    end)
+end
+
+function FolioView:showContents(issue)
+    self.contents_issue, self.tab, self.page = issue, "contents", 1
+    busy(_("Loading…"), function() self:loadDetail(issue) end)
+    self:refresh()
+end
+
+--- Open an issue (downloading it, or another format of it, first if needed).
+-- chapter: optional article title to jump to once the book is open.
+function FolioView:openIssue(issue, format, chapter)
+    local path = self.folio:localPath(issue)
+    if not path or (format and format ~= self.folio:localFormat(issue)) then
+        busy(_("Downloading…"), function() path = self.folio:downloadIssue(issue, format) end)
+    end
+    if not path then toast(_("That issue couldn't be downloaded.")) return end
+    self:close()
+    pending_chapter = chapter
+    self.folio:openFile(path)
+end
+
+function FolioView:generate()
+    local ids = {}
+    for id in pairs(self.selected) do table.insert(ids, id) end
+    if #ids == 0 then return end
+    if self.folio:makeIssue(ids) then
+        self.selected = {}
+        self:reload()
+    end
+end
+
+function FolioView:disconnect()
+    local ConfirmBox = require("ui/widget/confirmbox")
+    UIManager:show(ConfirmBox:new{
+        text = _("Disconnect this reader from Folio? Issues already here stay."),
+        ok_text = _("Disconnect"),
+        ok_callback = function()
+            self.folio:disconnect()
+            self.data = { details = {} }
+            self:startPairing()
+            self:refresh()
+        end,
+    })
+end
+
+function FolioView:chooseFolder()
+    local PathChooser = require("ui/widget/pathchooser")
+    UIManager:show(PathChooser:new{
+        select_file = false,
+        path = self.folio:downloadDir(),
+        onConfirm = function(path) self.folio:save("dir", path); self:refresh() end,
+    })
+end
+
+function FolioView:openFolder()
+    self:close()
+    local FileManager = require("apps/filemanager/filemanager")
+    lfs.mkdir(self.folio:downloadDir())
+    if FileManager.instance then
+        FileManager.instance.file_chooser:changeToPath(self.folio:downloadDir())
+    else
+        FileManager:showFiles(self.folio:downloadDir())
+    end
+end
+
+function FolioView:close()
+    if self.pairing then self.pairing.cancelled = true end
+    UIManager:close(self)
+end
+
+function FolioView:onClose() self:close() return true end
+
+function Folio:showFolio()
+    self.view = FolioView:new{ folio = self }
+    UIManager:show(self.view)
+end
+
+-- ─── menu + events ───────────────────────────────────────────────────────────
 
 function Folio:addToMainMenu(menu_items)
     menu_items.folio = {
         text = _("Folio"),
         sorting_hint = "tools",
-        sub_item_table_func = function()
-            if not self:token() then
-                return {
-                    { text = _("Connect to Folio"), callback = function() self:connect() end },
-                    { text = _("Server"), keep_menu_open = true, callback = function() self:promptServer() end },
-                }
-            end
-            return {
-                { text = _("Issues"), callback = function() self:showIssues() end },
-                { text = _("Inbox"), callback = function() self:showInbox() end },
-                { text = _("Check for new issues"), callback = function()
-                    NetworkMgr:runWhenOnline(function() self:sync(false) end)
-                end, separator = true },
-                { text = _("Download new issues on Wi-Fi"),
-                  checked_func = function() return self:autoSync() end,
-                  callback = function() self:save("auto_sync", not self:autoSync()) end },
-                { text_func = function() return T(_("Folder: %1"), self:downloadDir()) end,
-                  keep_menu_open = true,
-                  callback = function()
-                      local PathChooser = require("ui/widget/pathchooser")
-                      UIManager:show(PathChooser:new{
-                          select_file = false,
-                          path = self:downloadDir(),
-                          onConfirm = function(path) self:save("dir", path) end,
-                      })
-                  end },
-                { text = _("Server"), keep_menu_open = true, callback = function() self:promptServer() end },
-                { text = _("Disconnect"), callback = function() self:disconnect() end },
-            }
-        end,
+        callback = function() self:showFolio() end,
     }
+end
+
+-- Jump to the article the user tapped on the Contents screen.
+function Folio:onReaderReady()
+    local chapter = pending_chapter
+    pending_chapter = nil
+    if not chapter or not self.ui.toc then return end
+    self.ui.toc:fillToc()
+    for __, item in ipairs(self.ui.toc.toc or {}) do
+        local title = (item.title or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if title == chapter then
+            self.ui:handleEvent(require("ui/event"):new("GotoPage", item.page))
+            return
+        end
+    end
 end
 
 -- KOReader broadcasts this when Wi-Fi comes up (and once at start if it's already up).
 function Folio:onNetworkConnected()
     if self:token() and self:autoSync() then
-        UIManager:nextTick(function() self:sync(true) end)
+        UIManager:nextTick(function()
+            local got = self:sync(true)
+            if got > 0 then toast(T(_("%1 new Folio issue(s) on this reader."), got), 4) end
+        end)
     end
 end
 
