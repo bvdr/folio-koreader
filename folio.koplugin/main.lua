@@ -37,7 +37,7 @@ local Screen = Device.screen
 
 local UI = require("folioui")
 
-local VERSION = "0.2.2"
+local VERSION = "0.2.3"
 local DEFAULT_SERVER = "https://myfolio.so"
 -- Give up polling for a freshly made issue after this long; the next sync
 -- (or Wi-Fi reconnect) picks it up anyway.
@@ -651,10 +651,6 @@ function FolioView:refresh()
         local body = FrameContainer:new{ blocks[1], bordersize = 0, margin = 0, padding = 0,
             padding_left = px(32), padding_top = pad_top, padding_bottom = math.max(0, body_h + pad_bottom - inner_h) }
         content = VerticalGroup:new{ align = "left", top, body, UI.footer(self, W, self.page, self.pages) }
-        if self.tab == "issues" then
-            -- They've now seen the "arrived while you were away" card.
-            self.folio:save("unseen_new", nil)
-        end
     end
     self[1] = FrameContainer:new{ content, background = UI.C.paper, bordersize = 0, margin = 0, padding = 0, width = W, height = H }
     UIManager:setDirty(self, "ui")
@@ -752,6 +748,9 @@ end
 
 function FolioView:close()
     self.closed = true
+    -- They've now seen the "arrived while you were away" card. Cleared on close,
+    -- not on redraw: a background sync redraws the screen while they look at it.
+    self.folio:save("unseen_new", nil)
     if self.pairing then self.pairing.cancelled = true end
     UIManager:close(self)
 end

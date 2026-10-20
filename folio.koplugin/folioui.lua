@@ -40,14 +40,32 @@ local UI = {}
 -- ─── tokens ──────────────────────────────────────────────────────────────────
 
 local function gray(v) return Blitbuffer.Color8(v) end
-local C = {
+local function hex(h) return Blitbuffer.colorFromString(h) end
+-- Two palettes from the design: warm "color" tokens for color e-ink panels
+-- (Kobo Libra Colour, Boox, PocketBook Era Color) and the black & white set
+-- for everything else. Picked once at load; KOReader restarts on that toggle.
+local C = Screen:isColorEnabled() and {
+    paper = hex("#FAFAF7"),
+    ink = hex("#1C1917"),
+    muted = hex("#78716C"),
+    faint = hex("#A8A29E"),
+    line = hex("#E7E5E0"),
+    strong = hex("#D6D3D1"), -- outlines of secondary buttons, checkboxes, chips
+    surface = hex("#F5F5F0"),
+    mark = hex("#FEF3C7"),
+    success = hex("#4D7C5A"),
+    rainbow = { hex("#93C5FD"), hex("#86EFAC"), hex("#FDE68A"), hex("#FCA5A5") },
+} or {
     paper = Blitbuffer.COLOR_WHITE,
     ink = Blitbuffer.COLOR_BLACK,
     muted = gray(0x3D),
     faint = gray(0x6B),
     line = gray(0xA3),
+    strong = Blitbuffer.COLOR_BLACK,
     surface = gray(0xED),
     mark = gray(0xD6),
+    success = Blitbuffer.COLOR_BLACK,
+    rainbow = { gray(0xBD), gray(0x9E), gray(0xBD), gray(0x9E) },
 }
 UI.C = C
 
@@ -109,6 +127,8 @@ local function para(str, font, size, color, width, line_height)
     return TextBoxWidget:new{
         text = str, face = face(font, size), fgcolor = color or C.ink, width = width,
         line_height = (line_height or 1.3) - 1,
+        -- TextBoxWidget paints its own white box; match the warm paper on color screens.
+        bgcolor = C.paper,
     }
 end
 
@@ -230,7 +250,7 @@ local function button(label, kind, callback)
     local color = primary and C.paper or C.ink
     local b = box(text(label, F.sans_medium, 15, color), {
         padding = { 13, 22 }, fill = fill, radius = 6,
-        stroke = (not primary and not inverted) and C.ink or nil, stroke_width = 1.5,
+        stroke = (not primary and not inverted) and C.strong or nil, stroke_width = 1.5,
     })
     return tap(b, callback)
 end
@@ -243,7 +263,7 @@ local function toggle(on, callback)
     local pl = (on and (track_w - kw - pad) or pad) - bw
     local pt = math.floor((track_h - kw) / 2) - bw
     local t = FrameContainer:new{
-        knob, background = on and C.ink or C.paper, color = C.ink, bordersize = bw,
+        knob, background = on and C.ink or C.paper, color = on and C.ink or C.strong, bordersize = bw,
         radius = math.floor(track_h / 2), margin = 0, padding = 0,
         padding_left = pl, padding_top = pt,
         padding_right = track_w - kw - pl - 2 * bw, padding_bottom = track_h - kw - pt - 2 * bw,
@@ -333,7 +353,7 @@ function UI.nav(view, W)
     local left = row({ logo, row(tabs, 22, "bottom") }, 28)
     local last = view.folio.settings:readSetting("last_sync")
     local sync = tap(row({
-        dot(7, C.ink),
+        dot(7, C.success),
         text(view.folio.syncing and _("Syncing…") or (last and T(_("Synced %1"), clock(last)) or _("Sync now")), F.sans, 12, C.muted),
         icon("refresh-cw", 15),
     }, 7), function() view:syncNow() end)
@@ -457,10 +477,14 @@ function UI.issues(view, W, H)
         local word = NUMBER_WORDS[unseen] or tostring(unseen)
         local title = unseen == 1 and _("A new issue arrived while you were away.") or T(_("%1 issues arrived while you were away."), word)
         local iconbox = center(icon("wifi", 17), px(36), px(36), { stroke = C.line, radius = 8 })
-        table.insert(blocks, box(row({ iconbox, col({
+        local rule = HorizontalGroup:new{}
+        for i, color in ipairs(C.rainbow) do
+            table.insert(rule, hline(math.floor(W / 4) + (i == 4 and W % 4 or 0), color, 2))
+        end
+        table.insert(blocks, col({ rule, box(row({ iconbox, col({
             text(title, F.serif, 17, C.ink, W - px(100)),
             text(T(_("Downloaded when Wi-Fi came on. Saved to %1."), view.folio:folderLabel()), F.sans, 13, C.muted, W - px(100)),
-        }, 2) }, 14), { padding = { 14, 18 }, stroke = C.line, radius = 8, width = W }))
+        }, 2) }, 14), { padding = { 14, 18 }, stroke = C.line, radius = 8, width = W }) }))
     end
 
     -- Library grid
@@ -611,7 +635,7 @@ function UI.inbox(view, W, H)
         counts[o] = (counts[o] or 0) + 1
     end
     local add = tap(box(row({ icon("plus", 15), text(_("Add link"), F.sans_medium, 14) }, 6),
-        { padding = { 10, 16 }, stroke = C.ink, stroke_width = 1.5, radius = 6 }), function() view.folio:promptLink(function() view:reload() end) end)
+        { padding = { 10, 16 }, stroke = C.strong, stroke_width = 1.5, radius = 6 }), function() view.folio:promptLink(function() view:reload() end) end)
     local sub = #articles == 0 and _("Nothing waiting. Save links from your phone, or tap Add link.")
         or T(_("%1 articles waiting, about %2 of reading."), view.data.articles_total or #articles, minutes(total_min))
     local blocks = { heading(_("Inbox"), sub, add, W) }
@@ -667,7 +691,7 @@ function UI.inbox(view, W, H)
             local ready = a.scrape_status == "done"
             local on = view.selected[a.id]
             local check = on and center(icon("check-white", 13), px(20), px(20), { fill = C.ink, stroke = C.ink, stroke_width = 1.5, radius = 4 })
-                or center(VerticalSpan:new{ width = 0 }, px(20), px(20), { stroke = C.ink, stroke_width = 1.5, radius = 4 })
+                or center(VerticalSpan:new{ width = 0 }, px(20), px(20), { fill = C.paper, stroke = C.strong, stroke_width = 1.5, radius = 4 })
             local o = ORIGIN_BY_KEY[a.origin or "link"] or ORIGINS[1]
             local meta = {}
             -- Some newsletters arrive with a message id as their source name; skip those.
@@ -729,7 +753,7 @@ function UI.highlights(view, W, H)
                     { padding = { 3, 8 }, fill = C.mark, radius = 3 }))
             end
             local body = col(q, 6)
-            table.insert(parts, HorizontalGroup:new{ align = "top", vline(body:getSize().h, C.ink, 2), hspan(16), body })
+            table.insert(parts, HorizontalGroup:new{ align = "top", vline(body:getSize().h, C.strong, 2), hspan(16), body })
         end
         table.insert(rows, col(parts, 12))
     end
@@ -752,7 +776,7 @@ function UI.settings(view, W, H)
     local tw = W - px(32) - px(42) - px(28) - disconnect:getSize().w
     local account = box(spread(row({ avatar, col({
         text(plan and (name .. " · " .. plan) or name, F.sans_bold, 15, C.ink, tw),
-        row({ dot(6), text(connected and T(_("%1, connected %2"), device, os.date("%b ", connected) .. tonumber(os.date("%d", connected))) or device, F.sans, 13, C.muted, tw) }, 6),
+        row({ dot(6, C.success), text(connected and T(_("%1, connected %2"), device, os.date("%b ", connected) .. tonumber(os.date("%d", connected))) or device, F.sans, 13, C.muted, tw) }, 6),
     }, 3) }, 14), disconnect, W - px(32)), { padding = { 14, 16 }, fill = C.surface, radius = 8, width = W })
 
     local function section(title, items)
@@ -911,7 +935,7 @@ function UI.saveLinkSheet(folio, url, on_close)
             local active = state.category == (c or nil)
             local label = c or _("Let Folio pick")
             table.insert(chips, tap(box(text(label, F.sans_medium, 13, active and C.paper or C.ink),
-                { padding = { 6, 12 }, fill = active and C.ink or C.paper, stroke = C.ink, stroke_width = 1.5, radius = 20 }),
+                { padding = { 6, 12 }, fill = active and C.ink or C.paper, stroke = active and C.ink or C.strong, stroke_width = 1.5, radius = 20 }),
                 function() state.category = c or nil; widget:rebuild() end))
         end
         local buttons = row({
