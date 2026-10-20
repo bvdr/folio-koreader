@@ -90,6 +90,20 @@ Folio lives in KOReader's **Tools** menu, on the menu's second page. It's in the
 
 **Don't see Folio?** Check that the folder is called exactly `folio.koplugin` and sits directly in KOReader's `plugins` folder, then restart KOReader. If it's still missing, open **Tools → More tools → Plugin management** and make sure Folio is turned on.
 
+## Manage your readers on myfolio.so
+
+Your connected readers also show up in Folio on the web, under **Settings → Connections → KOReader**.
+
+1. **Open the KOReader row** in Settings → Connections. It shows the readers you've connected, like "Kobo Libra Colour".
+2. **Disconnect** a reader from here if you lose it, sell it, or just stop using it. It stops getting new issues right away. Issues already on it stay.
+3. **Get it on GitHub** takes you to the latest plugin release, if you're setting up another reader.
+4. **Enter a code** opens [myfolio.so/link](https://myfolio.so/link), where you type the code your reader shows.
+
+<p>
+<img src="screenshots/guide/5-web-settings.png" width="420" alt="Folio Settings, Connections card, with the KOReader row showing a connected Kobo Libra Colour">
+<img src="screenshots/guide/6-web-koreader.png" width="380" alt="Folio Settings, KOReader page: connected readers with Disconnect, and setup steps">
+</p>
+
 ## Use
 
 | Tab | What it does |
