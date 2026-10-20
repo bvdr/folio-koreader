@@ -770,7 +770,7 @@ function UI.settings(view, W, H)
     local name = me.name or me.email or "Folio"
     local plan = me.plan and (me.plan:gsub("^%l", string.upper) .. " " .. _("plan")) or nil
     local connected = folio.settings:readSetting("connected_at")
-    local device = (Device.model and Device.model ~= "") and Device.model or _("This reader")
+    local device = folio:deviceName()
     local avatar = center(text(name:sub(1, 1):upper(), F.serif, 20, C.paper), px(42), px(42), { fill = C.ink, radius = 21 })
     local disconnect = tap(text(_("Disconnect"), F.sans_medium, 13), function() view:disconnect() end)
     local tw = W - px(32) - px(42) - px(28) - disconnect:getSize().w

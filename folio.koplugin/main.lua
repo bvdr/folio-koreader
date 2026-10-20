@@ -37,7 +37,7 @@ local Screen = Device.screen
 
 local UI = require("folioui")
 
-local VERSION = "0.2.3"
+local VERSION = "0.2.4"
 local DEFAULT_SERVER = "https://myfolio.so"
 -- Give up polling for a freshly made issue after this long; the next sync
 -- (or Wi-Fi reconnect) picks it up anyway.
@@ -182,6 +182,30 @@ local NETWORK_ERROR = _("Couldn't reach Folio. Check your Wi-Fi and try again.")
 
 -- ─── pairing ─────────────────────────────────────────────────────────────────
 
+-- KOReader knows Kobos by codename; Settings on myfolio.so shows this name.
+-- From KOReader's frontend/device/kobo/device.lua. Unknown models fall back
+-- to the platform ("Kobo", "PocketBook", ...).
+local KOBO_NAMES = {
+    Kobo_nova = "Kobo Clara HD", Kobo_frost = "Kobo Forma", Kobo_storm = "Kobo Libra H2O",
+    Kobo_luna = "Kobo Nia", Kobo_europa = "Kobo Elipsa", Kobo_cadmus = "Kobo Sage",
+    Kobo_io = "Kobo Libra 2", Kobo_goldfinch = "Kobo Clara 2E", Kobo_condor = "Kobo Elipsa 2E",
+    Kobo_monza = "Kobo Libra Colour", Kobo_spaBW = "Kobo Clara BW", Kobo_spaColour = "Kobo Clara Colour",
+}
+
+--- A human name for this reader, e.g. "Kobo Libra Colour".
+function Folio:deviceName()
+    local model = Device.model or ""
+    if KOBO_NAMES[model] then return KOBO_NAMES[model] end
+    local checks = {
+        { "isKobo", "Kobo" }, { "isPocketBook", "PocketBook" }, { "isKindle", "Kindle" },
+        { "isRemarkable", "reMarkable" }, { "isCervantes", "Cervantes" }, { "isAndroid", "Android reader" },
+    }
+    for __, c in ipairs(checks) do
+        if Device[c[1]] and Device[c[1]]() then return c[2] end
+    end
+    return "KOReader"
+end
+
 --- Ask for a code and poll until the user approves it at /link.
 -- Returns the pairing table; set .cancelled on it to stop polling.
 function Folio:startPairing(on_update, on_done)
@@ -201,7 +225,7 @@ function Folio:startPairing(on_update, on_done)
     local function poll()
         if pairing.cancelled then return end
         if os.time() > deadline then return expired() end
-        local c, d = self:request("POST", "/api/auth/device/token", { device_code = data.device_code })
+        local c, d = self:request("POST", "/api/auth/device/token", { device_code = data.device_code, device_name = self:deviceName() })
         if c == 200 and d and d.token then
             self:save("token", d.token)
             self:save("connected_at", os.time())
