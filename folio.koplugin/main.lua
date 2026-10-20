@@ -37,7 +37,7 @@ local Screen = Device.screen
 
 local UI = require("folioui")
 
-local VERSION = "0.2.4"
+local VERSION = "0.2.5"
 local DEFAULT_SERVER = "https://myfolio.so"
 -- Give up polling for a freshly made issue after this long; the next sync
 -- (or Wi-Fi reconnect) picks it up anyway.
@@ -46,6 +46,9 @@ local ISSUE_POLL_MAX_TRIES = 40
 -- Article to jump to when the reader opens. Module-level because the reader
 -- gets its own plugin instance, separate from the file browser's.
 local pending_chapter
+-- Folio tab to reopen when the reader closes (after an inbox preview), so
+-- Back lands where the user was. Module-level for the same reason.
+local reopen_tab
 
 local Folio = WidgetContainer:extend{
     name = "folio",
@@ -56,6 +59,18 @@ local Folio = WidgetContainer:extend{
 function Folio:init()
     self.settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/folio.lua")
     self.ui.menu:registerToMainMenu(self)
+    if reopen_tab and not self.ui.document then
+        local tab = reopen_tab
+        reopen_tab = nil
+        UIManager:nextTick(function()
+            -- Home from a preview opens the browser in the preview cache folder;
+            -- point it back at the Folio folder underneath.
+            if self.ui.file_chooser and lfs.attributes(self:downloadDir(), "mode") == "directory" then
+                self.ui.file_chooser:changeToPath(self:downloadDir())
+            end
+            self:showFolio(tab)
+        end)
+    end
     if self.ui.link then
         self.ui.link:addToExternalLinkDialog("30_folio", function(this, link_url)
             return {
@@ -292,14 +307,23 @@ function Folio:downloadIssue(issue, format)
     end
 end
 
-function Folio:fetchIssues()
-    local code, data = self:request("GET", "/api/generations")
+-- Issues come 20 at a time; older ones load when the reader pages past the
+-- end of the library. Someone with years of weekly issues shouldn't wait for
+-- all of them on every open.
+local ISSUE_PAGE = 20
+
+--- One page of finished issues, newest first. Returns (issues, more) where
+-- more says the server may have older ones; (nil, code) on failure.
+function Folio:fetchIssues(offset)
+    offset = offset or 0
+    local code, data = self:request("GET", "/api/generations?limit=" .. ISSUE_PAGE .. "&offset=" .. offset)
     if code ~= 200 or type(data) ~= "table" then return nil, code end
     local done = {}
     for __, issue in ipairs(data) do
         if issue.status == "completed" then table.insert(done, issue) end
     end
-    return done
+    -- #data (all statuses) is what the next page's offset must skip.
+    return done, #data == ISSUE_PAGE, #data
 end
 
 --- Cover image for an issue, cached on disk (a finished cover never changes).
@@ -362,6 +386,7 @@ function Folio:sync(on_done)
             return
         end
         self:tidy(issues)
+        self:prunePreviews()
         self:save("last_sync", os.time())
         -- Cache categories for the save-link sheet, so it works offline later.
         local c, cats = self:request("GET", "/api/categories")
@@ -512,6 +537,91 @@ function Folio:promptServer(after)
     dialog:onShowKeyboard()
 end
 
+-- ─── inbox preview ───────────────────────────────────────────────────────────
+
+local mime = require("mime")
+
+--- Turn an inbox article into a local HTML file KOReader opens like a book.
+-- Images are saved next to it (data: URIs decoded, remote ones downloaded)
+-- so the preview works offline. Cached: the second open needs no network.
+function Folio:previewPath(article)
+    local dir = DataStorage:getDataDir() .. "/cache/folio-articles"
+    local path = dir .. "/" .. article.id .. ".html"
+    if lfs.attributes(path, "mode") == "file" then return path end
+    lfs.mkdir(DataStorage:getDataDir() .. "/cache")
+    lfs.mkdir(dir)
+    local code, a = self:request("GET", "/api/articles/" .. article.id .. "/reader")
+    if code ~= 200 or not a then return nil, code end
+
+    local n = 0
+    local function saveImage(src)
+        n = n + 1
+        if n > 30 then return nil end -- ponytail: cap per article; raise if long photo essays get cut
+        local base = article.id .. "-" .. n
+        local mimetype, b64 = src:match("^data:image/([%w+]+);base64,(.+)$")
+        if b64 then
+            local ext = mimetype:gsub("jpeg", "jpg"):gsub("%+xml", "")
+            local f = io.open(dir .. "/" .. base .. "." .. ext, "wb")
+            if not f then return nil end
+            f:write((mime.unb64(b64)))
+            f:close()
+            return base .. "." .. ext
+        end
+        if src:match("^https?://") then
+            local tmp = dir .. "/" .. base .. ".part"
+            local f = io.open(tmp, "wb")
+            if not f then return nil end
+            socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
+            local c, headers = socket.skip(1, http.request{ url = src, sink = ltn12.sink.file(f) })
+            socketutil:reset_timeout()
+            local ctype = headers and headers["content-type"] or ""
+            local ext = ctype:match("image/(%w+)")
+            if c ~= 200 or not ext then os.remove(tmp) return nil end
+            ext = ext:gsub("jpeg", "jpg")
+            os.rename(tmp, dir .. "/" .. base .. "." .. ext)
+            return base .. "." .. ext
+        end
+    end
+
+    local body = (a.body_html or "")
+        :gsub('%s+srcset="[^"]*"', ""):gsub("%s+sizes=\"[^\"]*\"", "")
+        :gsub('(<img[^>]-src=")([^"]+)(")', function(pre, src, post)
+            local file = saveImage(src)
+            return file and (pre .. file .. post) or (pre .. "" .. post)
+        end)
+    local meta = {}
+    if a.source_name and a.source_name ~= "" then table.insert(meta, a.source_name) end
+    if a.read_time_minutes then table.insert(meta, T(_("%1 min"), a.read_time_minutes)) end
+    local function esc(t) return (t or ""):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;") end
+    local html = table.concat({
+        '<!DOCTYPE html><html><head><meta charset="utf-8">',
+        "<title>", esc(a.title), "</title>",
+        "<style>img{max-width:100%}.folio-meta{font-size:0.85em;color:#555}</style>",
+        "</head><body>",
+        "<h1>", esc(a.title), "</h1>",
+        '<p class="folio-meta">', esc(table.concat(meta, " · ")), "</p>",
+        body,
+        "</body></html>",
+    })
+    local f = io.open(path, "w")
+    if not f then return nil end
+    f:write(html)
+    f:close()
+    return path
+end
+
+--- Previews older than 30 days are re-fetched on demand; keep the cache small.
+function Folio:prunePreviews()
+    local dir = DataStorage:getDataDir() .. "/cache/folio-articles"
+    if lfs.attributes(dir, "mode") ~= "directory" then return end
+    local cutoff = os.time() - 30 * 86400
+    for f in lfs.dir(dir) do
+        local p = dir .. "/" .. f
+        local mod = lfs.attributes(p, "modification")
+        if f ~= "." and f ~= ".." and mod and mod < cutoff then os.remove(p) end
+    end
+end
+
 -- ─── highlights ──────────────────────────────────────────────────────────────
 
 --- KOReader's highlights from every downloaded Folio issue, grouped by article
@@ -618,7 +728,8 @@ function FolioView:load()
     folio.offline = false
     busy(_("Loading Folio…"), function()
         if self.tab == "issues" then
-            self.data.issues = folio:fetchIssues() or self.data.issues
+            local issues, more, raw = folio:fetchIssues()
+            if issues then self.data.issues, self.data.issues_more, self.data.issues_offset = issues, more, raw end
             local latest = self.data.issues and self.data.issues[1]
             if latest then self:loadDetail(latest) end
         elseif self.tab == "inbox" then
@@ -686,9 +797,40 @@ function FolioView:go(tab)
     self:refresh()
 end
 
+--- More issues may be waiting on the server (Issues tab only).
+function FolioView:hasMore()
+    return self.tab == "issues" and self.data.issues_more == true
+end
+
 function FolioView:setPage(n)
+    if n > (self.pages or 1) and self:hasMore() then
+        -- Paged past what we have: fetch the next 20 older issues.
+        busy(_("Loading older issues…"), function()
+            local older, more, raw = self.folio:fetchIssues(self.data.issues_offset or 0)
+            if older then
+                for __, issue in ipairs(older) do table.insert(self.data.issues, issue) end
+                self.data.issues_more = more
+                self.data.issues_offset = (self.data.issues_offset or 0) + raw
+            end
+        end)
+    end
     self.page = n
     self:refresh()
+end
+
+--- Open an inbox article on its own, without making an issue. Back returns here.
+function FolioView:previewArticle(article)
+    local path, code
+    NetworkMgr:runWhenOnline(function()
+        busy(_("Opening article…"), function() path, code = self.folio:previewPath(article) end)
+        if not path then
+            toast(code and _("Folio couldn't open that article.") or NETWORK_ERROR)
+            return
+        end
+        reopen_tab = self.tab
+        self:close()
+        self.folio:openFile(path)
+    end)
 end
 
 function FolioView:reload()
@@ -781,8 +923,8 @@ end
 
 function FolioView:onClose() self:close() return true end
 
-function Folio:showFolio()
-    self.view = FolioView:new{ folio = self }
+function Folio:showFolio(tab)
+    self.view = FolioView:new{ folio = self, tab = tab }
     UIManager:show(self.view)
 end
 

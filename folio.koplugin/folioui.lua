@@ -365,12 +365,15 @@ end
 
 function UI.footer(view, W, page, pages)
     local function arrow(name, target)
-        return tap(icon(name, 24), function() if target >= 1 and target <= pages then view:setPage(target) end end)
+        return tap(icon(name, 24), function()
+            if target >= 1 and (target <= pages or view:hasMore()) then view:setPage(target) end
+        end)
     end
     local items = {
         tap(icon("menu", 26), function() view:close() end),
         arrow("chevrons-left", 1), arrow("chevron-left", page - 1),
-        text(T(_("Page %1 of %2"), page, pages), F.sans_medium, 15),
+        -- "3+" while older issues are still on the server (loaded 20 at a time).
+        text(T(_("Page %1 of %2"), page, pages .. (view:hasMore() and "+" or "")), F.sans_medium, 15),
         arrow("chevron-right", page + 1), arrow("chevrons-right", pages),
         tap(icon("layout-grid", 24), function() view:openFolder() end),
     }
@@ -489,7 +492,7 @@ function UI.issues(view, W, H)
 
     -- Library grid
     table.insert(blocks, col({
-        spread(text(_("Library"), F.serif, 28), text(T(_("%1 issues"), #issues), F.sans, 13, C.muted), W, "bottom"),
+        spread(text(_("Library"), F.serif, 28), text(T(_("%1 issues"), #issues .. (view:hasMore() and "+" or "")), F.sans, 13, C.muted), W, "bottom"),
         vspan(10), hline(W),
     }))
     local fixed = col(blocks, 32)
@@ -700,16 +703,22 @@ function UI.inbox(view, W, H)
             table.insert(meta, ORIGIN_SINGULAR[a.origin or "link"] or "")
             if ready and a.read_time_minutes then table.insert(meta, minutes(a.read_time_minutes)) end
             if not ready then table.insert(meta, _("still loading")) end
-            local tw = W - px(36)
-            local r = row({ check, col({
-                text(a.title or a.url or "", F.sans_medium, 15, ready and C.ink or C.faint, tw),
-                row({ icon(o.icon, 12), text(table.concat(meta, " · "), F.sans, 13, C.muted, tw - px(18)) }, 6),
-            }, 3) }, 16)
-            table.insert(rows, tap(col({ box(r, { padding = { 11, 0 } }), hline(W) }), function()
+            -- Two targets per row: the checkbox picks the article for an issue,
+            -- the rest opens it right away as a preview (no issue needed).
+            local toggle_check = tap(box(check, { padding = { 11, 16, 11, 0 } }), function()
                 if not ready then return end
                 view.selected[a.id] = (not on) or nil
                 view:refresh()
-            end))
+            end)
+            local tw = W - px(36) - px(26)
+            local body_w = W - toggle_check:getSize().w
+            local body = tap(box(spread(col({
+                text(a.title or a.url or "", F.sans_medium, 15, ready and C.ink or C.faint, tw),
+                row({ icon(o.icon, 12), text(table.concat(meta, " · "), F.sans, 13, C.muted, tw - px(18)) }, 6),
+            }, 3), icon("chevron-right", 16), body_w), { padding = { 11, 0 }, width = body_w }), function()
+                if ready then view:previewArticle(a) end
+            end)
+            table.insert(rows, col({ HorizontalGroup:new{ align = "center", toggle_check, body }, hline(W) }))
         end
     end
     local fixed = col(blocks, 20)
