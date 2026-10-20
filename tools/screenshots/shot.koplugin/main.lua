@@ -121,15 +121,24 @@ function Shot:init()
         end,
         function() shot("06-settings") end,
         function()
-            view:close()
-            local path = folio:localPath(view.data.issues and view.data.issues[1] or folio:fetchIssues()[1])
-            print("OPEN", path)
-            require("apps/reader/readerui"):showReader(path)
+            -- Preview an inbox article; readerSteps shoots it, then opens the issue.
+            _G.SHOT_ISSUE_PATH = folio:localPath(view.data.issues and view.data.issues[1] or folio:fetchIssues()[1])
+            view:go("inbox")
+            view:previewArticle(view.data.articles[1])
         end,
     }, 4)
 end
 
 function Shot:readerSteps(folio)
+    if self.ui.document.file:find("folio-articles", 1, true) then
+        return steps({
+            function() shot("07-preview") end,
+            function()
+                print("OPEN", _G.SHOT_ISSUE_PATH)
+                require("apps/reader/readerui"):showReader(_G.SHOT_ISSUE_PATH)
+            end,
+        }, 4)
+    end
     steps({
         function() self.ui:handleEvent(require("ui/event"):new("GotoPage", 3)) end,
         function() folio:showSaveLink("https://anildash.com/2012/12/13/the_web_we_lost/") end,
