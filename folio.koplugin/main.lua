@@ -37,7 +37,7 @@ local Screen = Device.screen
 
 local UI = require("folioui")
 
-local VERSION = "0.2.5"
+local VERSION = "0.2.6"
 local DEFAULT_SERVER = "https://myfolio.so"
 -- Give up polling for a freshly made issue after this long; the next sync
 -- (or Wi-Fi reconnect) picks it up anyway.
@@ -546,7 +546,8 @@ local mime = require("mime")
 -- so the preview works offline. Cached: the second open needs no network.
 function Folio:previewPath(article)
     local dir = DataStorage:getDataDir() .. "/cache/folio-articles"
-    local path = dir .. "/" .. article.id .. ".html"
+    -- "-v3": bump when the page template changes so cached previews are rebuilt.
+    local path = dir .. "/" .. article.id .. "-v3.html"
     if lfs.attributes(path, "mode") == "file" then return path end
     lfs.mkdir(DataStorage:getDataDir() .. "/cache")
     lfs.mkdir(dir)
@@ -596,7 +597,16 @@ function Folio:previewPath(article)
     local html = table.concat({
         '<!DOCTYPE html><html><head><meta charset="utf-8">',
         "<title>", esc(a.title), "</title>",
-        "<style>img{max-width:100%}.folio-meta{font-size:0.85em;color:#555}</style>",
+        -- A notch smaller than book text, with a quieter title, so a preview
+        -- reads like an article page rather than a chapter opener. Relative
+        -- sizes: KOReader's own font-size setting still scales everything.
+        "<style>",
+        "body{font-size:0.82em;line-height:1.45}",
+        "h1{font-size:1.45em;line-height:1.2;text-align:left;margin:0 0 0.3em}",
+        "h2{font-size:1.2em}h3{font-size:1.05em}",
+        ".folio-meta{font-size:0.8em;color:#555;text-indent:0;margin:0 0 1.2em}",
+        "img{max-width:100%}",
+        "</style>",
         "</head><body>",
         "<h1>", esc(a.title), "</h1>",
         '<p class="folio-meta">', esc(table.concat(meta, " · ")), "</p>",
