@@ -102,6 +102,9 @@ function Shot:init()
         function() view:showContents(view.data.issues[1]) end,
         function() shot("02-contents") end,
         function()
+            -- Public screenshots: show a made-up forwarding address, not the
+            -- test account's real one (checked unused in prod and dev).
+            folio:save("forward_email", "alex-reader@myfolio.so")
             view:go("inbox")
             local n = 0
             for i, a in ipairs(view.data.articles or {}) do
