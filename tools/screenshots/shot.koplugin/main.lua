@@ -55,7 +55,11 @@ function Shot:init()
             folio.view:close()
             folio:save("token", TOKEN); folio:save("connected_at", os.time() - 86400)
             folio:save("keep_latest", 8)
-            folio:sync(true)
+            -- Download synchronously here (the plugin's own sync runs in the
+            -- background) so the demo state below has files to attach to.
+            for i, issue in ipairs(folio:fetchIssues() or {}) do
+                if i <= folio:keepLatest() then folio:downloadIssue(issue) end
+            end
             -- Demo state: one issue part-read, one finished, real excerpts as highlights.
             local issues = folio:fetchIssues()
             local function seed(issue, pct, status, annotate)

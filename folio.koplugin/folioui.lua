@@ -334,7 +334,7 @@ function UI.nav(view, W)
     local last = view.folio.settings:readSetting("last_sync")
     local sync = tap(row({
         dot(7, C.ink),
-        text(last and T(_("Synced %1"), clock(last)) or _("Sync now"), F.sans, 12, C.muted),
+        text(view.folio.syncing and _("Syncing…") or (last and T(_("Synced %1"), clock(last)) or _("Sync now")), F.sans, 12, C.muted),
         icon("refresh-cw", 15),
     }, 7), function() view:syncNow() end)
     return col({
@@ -772,7 +772,7 @@ function UI.settings(view, W, H)
         return col(g)
     end
 
-    local keep = folio.settings:readSetting("keep_latest")
+    local keep = folio:keepLatest()
     local blocks = {
         text(_("Settings"), F.serif, 36),
         account,
@@ -782,8 +782,11 @@ function UI.settings(view, W, H)
             { label = _("Save to"), value = folio:folderLabel(), callback = function() view:chooseFolder() end },
             { label = _("Keep on this reader"), value = keep and T(_("Latest %1 issues"), keep) or _("All issues"),
               callback = function()
-                  local next_keep = { [false] = 4, [4] = 8, [8] = 12, [12] = false }
-                  folio:save("keep_latest", next_keep[keep or false] or nil)
+                  -- 4 → 8 → 12 → all → 4. false (not nil) stores "all", nil means the default 8.
+                  local next_keep = { [4] = 8, [8] = 12, [12] = false }
+                  local nxt = keep and next_keep[keep]
+                  if nxt == nil then nxt = keep and 8 or 4 end
+                  folio:save("keep_latest", nxt)
                   view:refresh()
               end },
             { label = _("Format"), value = folio:preferPdf() and "PDF" or "EPUB",

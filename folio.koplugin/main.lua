@@ -37,7 +37,7 @@ local Screen = Device.screen
 
 local UI = require("folioui")
 
-local VERSION = "0.2.1"
+local VERSION = "0.2.2"
 local DEFAULT_SERVER = "https://myfolio.so"
 -- Give up polling for a freshly made issue after this long; the next sync
 -- (or Wi-Fi reconnect) picks it up anyway.
@@ -301,23 +301,41 @@ function Folio:coverPath(issue)
     if code == nil then self.offline = true end
 end
 
---- Download every finished issue not on this reader yet, then tidy up.
--- quiet: only speak up when something new arrived (auto-sync on Wi-Fi).
-function Folio:sync(quiet)
-    if not self:token() or self.syncing then return 0 end
+--- How many of the newest issues to keep on the reader; nil means all.
+-- Defaults to 8 (the design's default): a long-time user can have dozens of
+-- issues at ~2 MB each, and downloading them all on first connect looked frozen.
+function Folio:keepLatest()
+    local v = self.settings:readSetting("keep_latest")
+    if v == nil then return 8 end
+    return v or nil
+end
+
+--- Download finished issues not on this reader yet, then tidy up.
+-- Runs one download per UI tick so the screen stays usable while it works.
+-- on_done(got, failed) runs at the end. Returns false if nothing was started.
+function Folio:sync(on_done)
+    if not self:token() or self.syncing then return false end
+    local issues, code = self:fetchIssues()
+    if not issues then
+        if on_done then on_done(0, code and "list" or "network") end
+        return false
+    end
     self.syncing = true
-    local got = 0
-    local run = function()
-        local issues, code = self:fetchIssues()
-        if not issues then
-            if not quiet then toast(code and _("Folio couldn't list your issues.") or NETWORK_ERROR) end
-            return
+    local keep = self:keepLatest()
+    local queue = {}
+    for i, issue in ipairs(issues) do
+        if (not keep or i <= keep) and not self:localPath(issue) and not self:wasRemoved(issue) then
+            table.insert(queue, issue)
         end
-        local keep = self.settings:readSetting("keep_latest")
-        for i, issue in ipairs(issues) do
-            if (not keep or i <= keep) and not self:localPath(issue) and not self:wasRemoved(issue) then
-                if self:downloadIssue(issue) then got = got + 1 end
-            end
+    end
+    local got = 0
+    local function step()
+        local issue = table.remove(queue, 1)
+        if issue then
+            local ok, path = pcall(self.downloadIssue, self, issue)
+            if ok and path then got = got + 1 elseif not ok then logger.err("Folio sync:", path) end
+            UIManager:scheduleIn(0.2, step)
+            return
         end
         self:tidy(issues)
         self:save("last_sync", os.time())
@@ -333,15 +351,11 @@ function Folio:sync(quiet)
             local FileManager = require("apps/filemanager/filemanager")
             if FileManager.instance then FileManager.instance:onRefresh() end
         end
+        self.syncing = false
+        if on_done then on_done(got) end
     end
-    if quiet then
-        local ok, err = pcall(run)
-        if not ok then logger.err("Folio sync:", err) end
-    else
-        busy(_("Checking Folio for new issues…"), run)
-    end
-    self.syncing = false
-    return got
+    UIManager:nextTick(step)
+    return true
 end
 
 --- Issues the plugin deleted on purpose are not downloaded again.
@@ -351,7 +365,7 @@ end
 
 --- Apply "Keep latest N" and "Delete finished issues".
 function Folio:tidy(issues)
-    local keep = self.settings:readSetting("keep_latest")
+    local keep = self:keepLatest()
     local delete_finished = self.settings:isTrue("delete_finished")
     local downloaded, removed = self:downloaded(), self.settings:readSetting("removed") or {}
     for i, issue in ipairs(issues) do
@@ -381,7 +395,10 @@ function Folio:waitForIssue(id, tries)
     UIManager:scheduleIn(ISSUE_POLL_SECONDS, function()
         local code, gen = self:request("GET", "/api/generations/" .. id)
         if code == 200 and gen and gen.status == "completed" then
-            if self:sync(true) > 0 then toast(_("Your new Folio issue is ready."), 4) end
+            self:sync(function(got)
+                if got > 0 then toast(_("Your new Folio issue is ready."), 4) end
+                if self.view and not self.view.closed then self.view:reload() end
+            end)
         elseif code == 200 and gen and gen.status == "failed" then
             toast(_("Folio couldn't make that issue. Try again from the app."))
         else
@@ -534,8 +551,24 @@ function FolioView:init()
     self.dimen = Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
     self.data = { details = {} }
     self.selected = {}
-    if self.folio:token() then self:load() else self:startPairing() end
-    self:refresh()
+    if self.folio:token() then
+        self:load()
+        self:refresh()
+        self:backgroundSync()
+    else
+        self:startPairing()
+        self:refresh()
+    end
+end
+
+--- Download new issues without blocking the screen, then redraw.
+function FolioView:backgroundSync(on_done)
+    local started = self.folio:sync(function(got, failed)
+        if not self.closed then self:reload() end
+        if on_done then on_done(got, failed) end
+    end)
+    if started then self:refresh() end -- show "Syncing…" in the nav
+    return started
 end
 
 function FolioView:startPairing()
@@ -547,19 +580,19 @@ function FolioView:startPairing()
             self:refresh()
         end, function()
             self.tab = "issues"
-            self:load(true)
+            self:load()
             self:refresh()
+            self:backgroundSync()
         end)
         self:refresh()
     end)
 end
 
 --- Fetch what the current tab needs. Blocking; shows a note while it runs.
-function FolioView:load(sync_first)
+function FolioView:load()
     local folio = self.folio
     folio.offline = false
     busy(_("Loading Folio…"), function()
-        if sync_first then folio:sync(true) end
         if self.tab == "issues" then
             self.data.issues = folio:fetchIssues() or self.data.issues
             local latest = self.data.issues and self.data.issues[1]
@@ -645,8 +678,12 @@ end
 
 function FolioView:syncNow()
     NetworkMgr:runWhenOnline(function()
-        self.folio:sync(false)
-        self:reload()
+        local started = self:backgroundSync(function(got, failed)
+            if failed then toast(failed == "network" and NETWORK_ERROR or _("Folio couldn't list your issues."))
+            elseif got > 0 then toast(T(_("%1 new Folio issue(s) on this reader."), got), 3)
+            else toast(_("You're up to date."), 2) end
+        end)
+        if not started and self.folio.syncing then toast(_("Already checking for new issues…"), 2) end
     end)
 end
 
@@ -714,6 +751,7 @@ function FolioView:openFolder()
 end
 
 function FolioView:close()
+    self.closed = true
     if self.pairing then self.pairing.cancelled = true end
     UIManager:close(self)
 end
@@ -754,8 +792,10 @@ end
 function Folio:onNetworkConnected()
     if self:token() and self:autoSync() then
         UIManager:nextTick(function()
-            local got = self:sync(true)
-            if got > 0 then toast(T(_("%1 new Folio issue(s) on this reader."), got), 4) end
+            self:sync(function(got)
+                if got > 0 then toast(T(_("%1 new Folio issue(s) on this reader."), got), 4) end
+                if self.view and not self.view.closed then self.view:reload() end
+            end)
         end)
     end
 end
