@@ -13,10 +13,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 : "${KOREADER:?set KOREADER to the extracted lib/koreader folder}"
 : "${FOLIO_TOKEN:?set FOLIO_TOKEN to a Folio device token}"
+# COLOR=false renders the black & white palette (grayscale e-ink).
+OUT="$ROOT/screenshots/$([ "${COLOR:-true}" = true ] && echo color || echo bw)"
+mkdir -p "$OUT"
 HOME_DIR="$(mktemp -d)"
 mkdir -p "$HOME_DIR/.config/koreader" "$HOME_DIR/books"
 cat > "$HOME_DIR/.config/koreader/settings.reader.lua" <<LUA
-return { home_dir = "$HOME_DIR/books", lastdir = "$HOME_DIR/books", quickstart_shown_version = 999999999999, color_rendering = true }
+return { home_dir = "$HOME_DIR/books", lastdir = "$HOME_DIR/books", quickstart_shown_version = 999999999999, color_rendering = ${COLOR:-true} }
 LUA
 ln -sfn "$ROOT/folio.koplugin" "$KOREADER/plugins/folio.koplugin"
 ln -sfn "$ROOT/tools/screenshots/shot.koplugin" "$KOREADER/plugins/shot.koplugin"
@@ -24,5 +27,5 @@ trap 'rm -f "$KOREADER/plugins/shot.koplugin"; rm -rf "$HOME_DIR"' EXIT
 cd "$KOREADER"
 HOME="$HOME_DIR" KO_MULTIUSER=1 SDL_VIDEO_DRIVER=offscreen \
   EMULATE_READER_W="${WIDTH:-1072}" EMULATE_READER_H="${HEIGHT:-1448}" EMULATE_READER_DPI=300 \
-  SHOT_OUT="$ROOT/screenshots" SHOT_TOKEN="$FOLIO_TOKEN" SHOT_SERVER="${FOLIO_SERVER:-https://myfolio.so}" \
+  SHOT_OUT="$OUT" SHOT_TOKEN="$FOLIO_TOKEN" SHOT_SERVER="${FOLIO_SERVER:-https://myfolio.so}" \
   timeout 400 ./reader.lua | grep -E "SHOT|STEP ERROR" || true

@@ -16,7 +16,19 @@ local Shot = WidgetContainer:extend{ name = "shot", is_doc_only = false }
 
 local function shot(name)
     UIManager:forceRePaint()
-    Device.screen:shot(OUT .. "/" .. name .. ".png")
+    local file = OUT .. "/" .. name .. ".png"
+    if Device.screen:isColorEnabled() then
+        Device.screen:shot(file)
+    else
+        -- The desktop emulator always draws in color; a grayscale e-ink panel
+        -- shows covers in gray, so convert to match what readers actually see.
+        local Blitbuffer = require("ffi/blitbuffer")
+        local src = Device.screen.bb
+        local gray = Blitbuffer.new(src:getWidth(), src:getHeight(), Blitbuffer.TYPE_BB8)
+        gray:blitFrom(src)
+        gray:writePNG(file)
+        gray:free()
+    end
     print("SHOT", name)
 end
 
