@@ -857,7 +857,11 @@ function UI.connect(view, W, H, full_w, full_h)
             step(2, _("Enter this code"), nil, code_card),
             step(3, _("That is all"), _("New issues download whenever Wi-Fi is on.")),
         }, 20),
-        row({ text(_("New to Folio?"), F.sans, 14, C.muted), text(_("Try it at myfolio.so"), F.sans_medium, 14) }, 6),
+        spread(row({ text(_("New to Folio?"), F.sans, 14, C.muted), text(_("Try it at myfolio.so"), F.sans_medium, 14) }, 6),
+            -- Testers point the plugin at another Folio server before pairing.
+            tap(text(_("Server"), F.sans, 14, C.faint), function()
+                view.folio:promptServer(function() view:close(); view.folio:showFolio() end)
+            end), cw),
     }, 30), { padding = { 40, 48 } })
 
     -- Ghost wordmark, bleeding off the bottom like the design.

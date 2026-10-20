@@ -37,7 +37,7 @@ local Screen = Device.screen
 
 local UI = require("folioui")
 
-local VERSION = "0.2.0"
+local VERSION = "0.2.1"
 local DEFAULT_SERVER = "https://myfolio.so"
 -- Give up polling for a freshly made issue after this long; the next sync
 -- (or Wi-Fi reconnect) picks it up anyway.
