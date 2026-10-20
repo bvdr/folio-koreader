@@ -56,7 +56,7 @@ It also works with AI assistants. Connect Claude, ChatGPT, Gemini or Grok to Fol
 
 ## Works on
 
-Any device that runs KOReader: Kobo (Clara, Libra, Sage, Elipsa), PocketBook, jailbroken Kindles, Android e-readers like Boox, reMarkable, and KOReader on Linux or macOS.
+Any device that runs KOReader: Kobo (Clara, Libra, Sage, Elipsa), PocketBook, Kindle, Android e-readers like Boox, reMarkable, and KOReader on Linux or macOS.
 
 ## Install
 
